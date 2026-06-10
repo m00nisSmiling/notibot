@@ -2,10 +2,17 @@
 import os
 import sys
 import subprocess
+import socket
 
+print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
+
+real_hostname = socket.gethostname()
+custom_hostname = input(f"Server Hostname [Default: {real_hostname}]: ").strip()
+if not custom_hostname:
+    custom_hostname = real_hostname
 
 if WEB_SERVER_TYPE not in ["nginx", "apache"]:
     print("[!] Warning: Invalid server selection. Defaulting background tracking to nginx.")
@@ -20,7 +27,6 @@ import re
 import time
 import queue
 import threading
-import socket
 import click
 import requests
 from collections import defaultdict
@@ -33,6 +39,7 @@ console = Console()
 
 TELEGRAM_BOT_TOKEN = "___BOT_TOKEN___"
 TELEGRAM_CHAT_ID = "___CHAT_ID___"
+CONFIGURED_HOSTNAME = "___HOSTNAME___"
 
 PATHS = {
     "nginx": "/var/log/nginx/access.log",
@@ -61,21 +68,46 @@ SSH_WINDOW_SECONDS = 30
 def send_telegram_alert(log_type, alert):
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
         return
-    hostname = socket.gethostname()
     
-    # Capture and dynamically construct HTTP response visibility strings
     status_str = f" [Status: {alert['status']}]" if log_type == "web" else ""
     
     msg = (
         f"- [{alert['severity']} RISK]\n"
         f"- Traffic Detail: <code>{alert['ip']} -> {alert['info']}{status_str} ({alert['event']})</code>\n"
-        f"- Server Host Name: <code>{hostname}</code>"
+        f"- Server Host Name: <code>{CONFIGURED_HOSTNAME}</code>"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
     except Exception:
         pass
+
+def send_heartbeat_message():
+    """Sends a clean server status keep-alive alert every 24 hours."""
+    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    msg = f"🟢 <b>[{CONFIGURED_HOSTNAME}]</b> : Active"
+    
+    try:
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
+    except Exception:
+        pass
+
+def heartbeat_loop():
+    """Independent background loop counting down 24 hours (86400 seconds) silently."""
+    # Sends an immediate verification heartbeat check upon daemon service startup/reboot
+    send_heartbeat_message()
+    
+    while True:
+        time.sleep(86400)  # Wait exactly 24 hours
+        send_heartbeat_message()
+
+def start_heartbeat_thread():
+    """Spawns the heartbeat loop inside an isolated thread so log tracking is never paused."""
+    t = threading.Thread(target=heartbeat_loop, daemon=True)
+    t.start()
 
 def analyze_web_line(line):
     match = re.match(r'(?P<ip>\S+) \S+ \S+ \[(?P<date>.*?)\] "(?P<method>\S+) (?P<url>\S+)\s?\S*" (?P<status>\d+) (?P<bytes>\S+)', line)
@@ -141,6 +173,11 @@ def analyze_ssh_line(line):
     return None 
 
 def daemon_engine(log_type, target):
+    # Fire up the background heartbeat sequence exclusively on the web monitor daemon instantiation 
+    # to avoid double notifications being triggered by the SSH daemon process.
+    if log_type == "web":
+        start_heartbeat_thread()
+
     path = PATHS[target] if log_type == "web" else PATHS["ssh"]
     cache_path = CACHE_FILES[log_type]
     
@@ -208,8 +245,11 @@ if __name__ == "__main__":
     cli()
 """
 
-TOOL_CODE = TOOL_CODE.replace("___BOT_TOKEN___", TELEGRAM_BOT_TOKEN).replace("___CHAT_ID___", TELEGRAM_CHAT_ID)
+TOOL_CODE = TOOL_CODE.replace("___BOT_TOKEN___", TELEGRAM_BOT_TOKEN)
+TOOL_CODE = TOOL_CODE.replace("___CHAT_ID___", TELEGRAM_CHAT_ID)
+TOOL_CODE = TOOL_CODE.replace("___HOSTNAME___", custom_hostname)
 
+# --- SYSTEMD DAEMON GENERATION LAYOUTS ---
 WCHECK_SERVICE = f"""[Unit]
 Description=SIEM Engine - Web Monitoring Background Service
 After=network.target
@@ -290,6 +330,7 @@ def main():
     run_cmd(f"chmod +x {shcheck_wrapper_path}")
 
     print("\n[============= DEPLOYMENT COMPLETE =============]")
+    print(f"[*] Configured Hostname: {custom_hostname}")
     print("[*] Background SIEM engines are running smoothly.")
     print("[*] Run interactively anytime via your shortcuts:")
     print(f"    ->  wcheck {WEB_SERVER_TYPE}")
