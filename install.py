@@ -67,16 +67,21 @@ SSH_THRESHOLD_LIMIT = 3
 SSH_WINDOW_SECONDS = 60
 
 def send_telegram_alert(log_type, alert):
-    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN or "YOUR_BOT_TOKEN" in TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
         return
     
-    status_str = f" [Status: {alert['status']}]" if log_type == "web" else ""
-    
+    if log_type == "web":
+        detail = f"{alert['ip']} -> {alert['info']} [Status: {alert['status']}]"
+    else:
+        detail = f"{alert['ip']} -> {alert['info']}"
+
     msg = (
-        f"[{alert['severity']} RISK]\n"
-        f"Traffic Detail: <code>{alert['ip']} -> {alert['info']}{status_str} ({alert['event']})</code>\n"
-        f"Hostname: <code>{CONFIGURED_HOSTNAME}</code>"
+        f"<b>[{alert['severity']} RISK ALERT]</b>\n"
+        f"<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n"
+        f"<b>Event:</b> <code>{alert['event']}</code>\n"
+        f"<b>Detail:</b> <code>{detail}</code>"
     )
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
@@ -84,7 +89,7 @@ def send_telegram_alert(log_type, alert):
         pass
 
 def send_heartbeat_message():
-    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN or "YOUR_BOT_TOKEN" in TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     msg = f"🟢 <b>[{CONFIGURED_HOSTNAME}]</b> : Active"
@@ -130,17 +135,14 @@ def analyze_web_line(line):
     return {"time": data['date'].split()[0], "ip": data['ip'], "info": f"{data['method']} {data['url'][:40]}", "status": data['status'], "severity": severity, "event": event}
 
 def analyze_ssh_line(line):
-    # Extracts timestamp cleanly from both ISO 8601 and old Syslog styles
     parts = line.strip().split()
     if not parts:
         return None
     
     log_time = parts[0]
-    # Check if traditional syslog format (e.g. Jun 10 11:49:15)
     if len(log_time) < 5 and len(parts) >= 3:
         log_time = f"{parts[0]} {parts[1]} {parts[2]}"
 
-    # Precise matching using simplified substrings to ensure matches are never dropped
     failed_match = re.search(r"Failed password for (invalid user )?(\S+) from (\S+) port", line)
     accepted_match = re.search(r"Accepted password for (\S+) from (\S+) port", line)
     
@@ -151,7 +153,6 @@ def analyze_ssh_line(line):
         
         tracker = SSH_TRACKER[ip]
         
-        # Initialize or check sliding window boundaries
         if tracker["first_seen"] == 0.0 or (current_time - tracker["first_seen"] > SSH_WINDOW_SECONDS):
             tracker["count"] = 1
             tracker["first_seen"] = current_time
@@ -159,11 +160,9 @@ def analyze_ssh_line(line):
         else:
             tracker["count"] += 1
 
-        # Escalate status to high risk once threshold limits are met
         if tracker["count"] >= SSH_THRESHOLD_LIMIT:
             severity = "HIGH"
             event = f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
-            # Set alert logic to prevent duplicate Telegram notifications
             should_alert = not tracker["reported"]
             if should_alert:
                 tracker["reported"] = True
@@ -229,11 +228,9 @@ def daemon_engine(log_type, target):
                     if alert['severity'] == "HIGH":
                         threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
                 else:
-                    # SSH entries update your interactive dashboard instantly
                     with open(cache_path, "a") as cache_f:
                         cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
-                    # Direct filter check: Only forward high-severity brute forces to Telegram
                     if alert.get("trigger_telegram", False):
                         threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
 
