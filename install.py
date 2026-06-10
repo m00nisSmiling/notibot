@@ -76,7 +76,7 @@ def send_telegram_alert(log_type, alert):
         detail = f"{alert['ip']} -> {alert['info']}"
 
     msg = (
-        f"🚨 <b>[{alert['severity']}]</b>\n"
+        f"🚨 <b>{alert['severity']}</b>\n"
         f"<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n"
         f"<b>Event:</b> <code>{alert['event']}</code>\n"
         f"<b>Detail:</b> <code>{detail}</code>"
