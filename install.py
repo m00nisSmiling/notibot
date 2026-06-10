@@ -3,10 +3,6 @@ import os
 import sys
 import subprocess
 
-# =====================================================================
-#  INTERACTIVE DEPLOYMENT CONFIGURATION
-# =====================================================================
-print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -58,18 +54,21 @@ WEB_SIGNATURES = {
     "Web Shell Probe": re.compile(r"(cmd\.php|shell\.php|exec\(|eval\(|passthru\()", re.I)
 }
 
-# Thread-safe in-memory sliding trackers for brute-forcing
 SSH_TRACKER = defaultdict(lambda: {"count": 0, "first_seen": 0.0})
-SSH_THRESHOLD_LIMIT = 5       # Max allowed failures before alert escalation
-SSH_WINDOW_SECONDS = 30       # Sliding window observation timeframe in seconds
+SSH_THRESHOLD_LIMIT = 5
+SSH_WINDOW_SECONDS = 30
 
 def send_telegram_alert(log_type, alert):
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
         return
     hostname = socket.gethostname()
+    
+    # Capture and dynamically construct HTTP response visibility strings
+    status_str = f" [Status: {alert['status']}]" if log_type == "web" else ""
+    
     msg = (
         f"- [{alert['severity']} RISK]\n"
-        f"- Traffic Detail: <code>{alert['ip']} -> {alert['info']} ({alert['event']})</code>\n"
+        f"- Traffic Detail: <code>{alert['ip']} -> {alert['info']}{status_str} ({alert['event']})</code>\n"
         f"- Server Host Name: <code>{hostname}</code>"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
