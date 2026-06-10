@@ -4,7 +4,6 @@ import sys
 import subprocess
 import socket
 
-print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -21,6 +20,7 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
+# Core Tool Code with Integrated HTTP Status Codes, Brute Force Protection, and 24h Heartbeat
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -83,7 +83,7 @@ def send_telegram_alert(log_type, alert):
         pass
 
 def send_heartbeat_message():
-    """Sends a clean server status keep-alive alert every 24 hours."""
+    # Sends a clean server status keep-alive alert every 24 hours.
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
         return
     
@@ -96,8 +96,7 @@ def send_heartbeat_message():
         pass
 
 def heartbeat_loop():
-    """Independent background loop counting down 24 hours (86400 seconds) silently."""
-    # Sends an immediate verification heartbeat check upon daemon service startup/reboot
+    # Independent background loop counting down 24 hours (86400 seconds) silently.
     send_heartbeat_message()
     
     while True:
@@ -105,7 +104,7 @@ def heartbeat_loop():
         send_heartbeat_message()
 
 def start_heartbeat_thread():
-    """Spawns the heartbeat loop inside an isolated thread so log tracking is never paused."""
+    # Spawns the heartbeat loop inside an isolated thread so log tracking is never paused.
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
 
@@ -173,8 +172,6 @@ def analyze_ssh_line(line):
     return None 
 
 def daemon_engine(log_type, target):
-    # Fire up the background heartbeat sequence exclusively on the web monitor daemon instantiation 
-    # to avoid double notifications being triggered by the SSH daemon process.
     if log_type == "web":
         start_heartbeat_thread()
 
