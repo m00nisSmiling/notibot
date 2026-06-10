@@ -72,9 +72,9 @@ def send_telegram_alert(log_type, alert):
     status_str = f" [Status: {alert['status']}]" if log_type == "web" else ""
     
     msg = (
-        f"- [{alert['severity']} RISK]\n"
-        f"- Traffic Detail: <code>{alert['ip']} -> {alert['info']}{status_str} ({alert['event']})</code>\n"
-        f"- Server Host Name: <code>{CONFIGURED_HOSTNAME}</code>"
+        f"[{alert['severity']} RISK]\n"
+        f"Traffic Detail: <code>{alert['ip']} -> {alert['info']}{status_str} ({alert['event']})</code>\n"
+        f"Hostname: <code>{CONFIGURED_HOSTNAME}</code>"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
