@@ -4,7 +4,6 @@ import sys
 import subprocess
 import socket
 
-print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -52,6 +51,8 @@ CACHE_FILES = {
     "ssh": "/tmp/shcheck_live.alerts"
 }
 
+STATUS_FILE = "/tmp/.wcheck_active_view"
+
 WEB_SIGNATURES = {
     "SQLi": re.compile(r"(UNION[\s/\*]+SELECT|SELECT.+FROM|INSERT[\s/\*]+INTO|OR[\s/\*]+[\d\w]+[\s/\*]*=)", re.I),
     "XSS": re.compile(r"(<script>|javascript:|onerror\s*=|onload\s*=|alert\()", re.I),
@@ -62,8 +63,8 @@ WEB_SIGNATURES = {
 }
 
 SSH_TRACKER = defaultdict(lambda: {"count": 0, "first_seen": 0.0, "reported": False})
-SSH_THRESHOLD_LIMIT = 5
-SSH_WINDOW_SECONDS = 30
+SSH_THRESHOLD_LIMIT = 3
+SSH_WINDOW_SECONDS = 60
 
 def send_telegram_alert(log_type, alert):
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
@@ -129,51 +130,74 @@ def analyze_web_line(line):
     return {"time": data['date'].split()[0], "ip": data['ip'], "info": f"{data['method']} {data['url'][:40]}", "status": data['status'], "severity": severity, "event": event}
 
 def analyze_ssh_line(line):
-    timestamp_match = re.match(r"^(\S+)\s+", line)
-    log_time = timestamp_match.group(1) if timestamp_match else "Unknown"
-    if len(log_time) < 5:
-        log_time = " ".join(line.split()[:3])
+    # Extracts timestamp cleanly from both ISO 8601 and old Syslog styles
+    parts = line.strip().split()
+    if not parts:
+        return None
+    
+    log_time = parts[0]
+    # Check if traditional syslog format (e.g. Jun 10 11:49:15)
+    if len(log_time) < 5 and len(parts) >= 3:
+        log_time = f"{parts[0]} {parts[1]} {parts[2]}"
 
-    failed_match = re.search(r"Failed password for (invalid user )?(?P<user>\S+) from (?P<ip>\S+) port", line)
-    accepted_match = re.search(r"Accepted password for (?P<user>\S+) from (?P<ip>\S+) port", line)
+    # Precise matching using simplified substrings to ensure matches are never dropped
+    failed_match = re.search(r"Failed password for (invalid user )?(\S+) from (\S+) port", line)
+    accepted_match = re.search(r"Accepted password for (\S+) from (\S+) port", line)
     
     if failed_match:
-        ip = failed_match.group("ip")
-        user = failed_match.group("user")
+        user = failed_match.group(2)
+        ip = failed_match.group(3)
         current_time = time.time()
         
         tracker = SSH_TRACKER[ip]
         
-        # Reset tracker window if the threshold time passed
-        if current_time - tracker["first_seen"] > SSH_WINDOW_SECONDS:
+        # Initialize or check sliding window boundaries
+        if tracker["first_seen"] == 0.0 or (current_time - tracker["first_seen"] > SSH_WINDOW_SECONDS):
             tracker["count"] = 1
             tracker["first_seen"] = current_time
             tracker["reported"] = False
         else:
             tracker["count"] += 1
 
-        # Only trigger an alert line when it hits or surpasses the exact threshold boundary
-        if tracker["count"] >= SSH_THRESHOLD_LIMIT and not tracker["reported"]:
-            tracker["reported"] = True  # Stop repetitive logs from this IP until window resets
-            return {
-                "time": log_time, 
-                "ip": ip, 
-                "info": f"User: {user} (Failed {tracker['count']}x)", 
-                "status": "-", 
-                "severity": "HIGH", 
-                "event": f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
-            }
-        
-        # Drop the line completely if it's noise or intermediate aggregation steps
-        return None
+        # Escalate status to high risk once threshold limits are met
+        if tracker["count"] >= SSH_THRESHOLD_LIMIT:
+            severity = "HIGH"
+            event = f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
+            # Set alert logic to prevent duplicate Telegram notifications
+            should_alert = not tracker["reported"]
+            if should_alert:
+                tracker["reported"] = True
+        else:
+            severity = "LOW"
+            event = f"Failed SSH Login Attempt (Count: {tracker['count']})"
+            should_alert = False
+
+        return {
+            "time": log_time.split("T")[-1].split(".")[0] if "T" in log_time else log_time, 
+            "ip": ip, 
+            "info": f"User: {user}", 
+            "status": "-", 
+            "severity": severity, 
+            "event": event,
+            "trigger_telegram": should_alert
+        }
 
     elif accepted_match:
-        ip = accepted_match.group("ip")
+        user = accepted_match.group(1)
+        ip = accepted_match.group(2)
         if ip in SSH_TRACKER:
             del SSH_TRACKER[ip]
             
-        severity = "HIGH" if "root" in accepted_match.group("user") else "LOW"
-        return {"time": log_time, "ip": ip, "info": f"User: {accepted_match.group('user')}", "status": "-", "severity": severity, "event": "Successful SSH Authentication"}
+        severity = "HIGH" if "root" in user else "LOW"
+        return {
+            "time": log_time.split("T")[-1].split(".")[0] if "T" in log_time else log_time, 
+            "ip": ip, 
+            "info": f"User: {user}", 
+            "status": "-", 
+            "severity": severity, 
+            "event": "Successful SSH Authentication",
+            "trigger_telegram": True
+        }
         
     return None 
 
@@ -184,7 +208,6 @@ def daemon_engine(log_type, target):
     path = PATHS[target] if log_type == "web" else PATHS["ssh"]
     cache_path = CACHE_FILES[log_type]
     
-    with open(cache_path, "w") as c: c.write("")
     if not os.path.exists(path): return
 
     with open(path, "r") as f:
@@ -197,13 +220,29 @@ def daemon_engine(log_type, target):
             
             alert = analyze_web_line(line) if log_type == "web" else analyze_ssh_line(line)
             if alert:
-                with open(cache_path, "a") as cache_f:
-                    cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
-                if alert['severity'] == "HIGH":
-                    threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
+                if log_type == "web":
+                    is_normal_web = (alert['severity'] == "LOW" and alert['event'] == "Normal Web Traffic")
+                    is_view_active = os.path.exists(STATUS_FILE)
+                    if not is_normal_web or is_view_active:
+                        with open(cache_path, "a") as cache_f:
+                            cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
+                    if alert['severity'] == "HIGH":
+                        threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
+                else:
+                    # SSH entries update your interactive dashboard instantly
+                    with open(cache_path, "a") as cache_f:
+                        cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
+                    
+                    # Direct filter check: Only forward high-severity brute forces to Telegram
+                    if alert.get("trigger_telegram", False):
+                        threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
 
 def run_interactive_ui(log_type, title, col_headers):
     cache_path = CACHE_FILES[log_type]
+    
+    if log_type == "web":
+        with open(STATUS_FILE, "w") as sf: sf.write("1")
+
     if not os.path.exists(cache_path):
         with open(cache_path, "w") as f: pass
 
@@ -211,22 +250,29 @@ def run_interactive_ui(log_type, title, col_headers):
     for col in col_headers: table.add_column(col)
     console.print("[bold green]Entering Interactive View. Ctrl+C to exit dashboard (Daemon stays alive).[/]")
     
-    with Live(table, refresh_per_second=4):
-        with open(cache_path, "r") as f:
-            f.seek(0, os.SEEK_END)
-            while True:
-                line = f.readline()
-                if not line:
-                    time.sleep(0.2)
-                    continue
-                parts = line.strip().split("|")
-                if len(parts) == 6:
-                    time_val, ip, info, status, severity, event = parts
-                    color = "red" if severity == "HIGH" else "yellow" if severity == "MEDIUM" else "blue"
-                    if log_type == "web":
-                        table.add_row(time_val, ip, info, status, f"[{color}]{severity}[/]", event)
-                    else:
-                        table.add_row(time_val, ip, info, f"[{color}]{severity}[/]", event)
+    try:
+        with Live(table, refresh_per_second=4):
+            with open(cache_path, "r") as f:
+                f.seek(0, os.SEEK_END)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        time.sleep(0.2)
+                        continue
+                    parts = line.strip().split("|")
+                    if len(parts) == 6:
+                        time_val, ip, info, status, severity, event = parts
+                        color = "red" if severity == "HIGH" else "yellow" if severity == "MEDIUM" else "blue"
+                        if log_type == "web":
+                            table.add_row(time_val, ip, info, status, f"[{color}]{severity}[/]", event)
+                        else:
+                            table.add_row(time_val, ip, info, f"[{color}]{severity}[/]", event)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if log_type == "web" and os.path.exists(STATUS_FILE):
+            try: os.remove(STATUS_FILE)
+            except Exception: pass
 
 @click.group()
 def cli(): pass
