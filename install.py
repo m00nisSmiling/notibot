@@ -4,6 +4,7 @@ import sys
 import subprocess
 import socket
 
+print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -20,7 +21,6 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
-# Core Tool Code with Integrated HTTP Status Codes, Brute Force Protection, and 24h Heartbeat
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -61,7 +61,7 @@ WEB_SIGNATURES = {
     "Web Shell Probe": re.compile(r"(cmd\.php|shell\.php|exec\(|eval\(|passthru\()", re.I)
 }
 
-SSH_TRACKER = defaultdict(lambda: {"count": 0, "first_seen": 0.0})
+SSH_TRACKER = defaultdict(lambda: {"count": 0, "first_seen": 0.0, "reported": False})
 SSH_THRESHOLD_LIMIT = 5
 SSH_WINDOW_SECONDS = 30
 
@@ -83,28 +83,22 @@ def send_telegram_alert(log_type, alert):
         pass
 
 def send_heartbeat_message():
-    # Sends a clean server status keep-alive alert every 24 hours.
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
         return
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     msg = f"🟢 <b>[{CONFIGURED_HOSTNAME}]</b> : Active"
-    
     try:
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
     except Exception:
         pass
 
 def heartbeat_loop():
-    # Independent background loop counting down 24 hours (86400 seconds) silently.
     send_heartbeat_message()
-    
     while True:
-        time.sleep(86400)  # Wait exactly 24 hours
+        time.sleep(86400)
         send_heartbeat_message()
 
 def start_heartbeat_thread():
-    # Spawns the heartbeat loop inside an isolated thread so log tracking is never paused.
     t = threading.Thread(target=heartbeat_loop, daemon=True)
     t.start()
 
@@ -135,6 +129,11 @@ def analyze_web_line(line):
     return {"time": data['date'].split()[0], "ip": data['ip'], "info": f"{data['method']} {data['url'][:40]}", "status": data['status'], "severity": severity, "event": event}
 
 def analyze_ssh_line(line):
+    timestamp_match = re.match(r"^(\S+)\s+", line)
+    log_time = timestamp_match.group(1) if timestamp_match else "Unknown"
+    if len(log_time) < 5:
+        log_time = " ".join(line.split()[:3])
+
     failed_match = re.search(r"Failed password for (invalid user )?(?P<user>\S+) from (?P<ip>\S+) port", line)
     accepted_match = re.search(r"Accepted password for (?P<user>\S+) from (?P<ip>\S+) port", line)
     
@@ -145,21 +144,28 @@ def analyze_ssh_line(line):
         
         tracker = SSH_TRACKER[ip]
         
+        # Reset tracker window if the threshold time passed
         if current_time - tracker["first_seen"] > SSH_WINDOW_SECONDS:
             tracker["count"] = 1
             tracker["first_seen"] = current_time
-            severity = "LOW"
-            event = "Failed SSH Login Attempt (Noise)"
+            tracker["reported"] = False
         else:
             tracker["count"] += 1
-            if tracker["count"] >= SSH_THRESHOLD_LIMIT:
-                severity = "HIGH"
-                event = f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
-            else:
-                severity = "LOW"
-                event = "Failed SSH Login Attempt (Aggregating)"
 
-        return {"time": " ".join(line.split()[:3]), "ip": ip, "info": f"User: {user} (Failed {tracker['count']}x)", "status": "-", "severity": severity, "event": event}
+        # Only trigger an alert line when it hits or surpasses the exact threshold boundary
+        if tracker["count"] >= SSH_THRESHOLD_LIMIT and not tracker["reported"]:
+            tracker["reported"] = True  # Stop repetitive logs from this IP until window resets
+            return {
+                "time": log_time, 
+                "ip": ip, 
+                "info": f"User: {user} (Failed {tracker['count']}x)", 
+                "status": "-", 
+                "severity": "HIGH", 
+                "event": f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
+            }
+        
+        # Drop the line completely if it's noise or intermediate aggregation steps
+        return None
 
     elif accepted_match:
         ip = accepted_match.group("ip")
@@ -167,7 +173,7 @@ def analyze_ssh_line(line):
             del SSH_TRACKER[ip]
             
         severity = "HIGH" if "root" in accepted_match.group("user") else "LOW"
-        return {"time": " ".join(line.split()[:3]), "ip": ip, "info": f"User: {accepted_match.group('user')}", "status": "-", "severity": severity, "event": "Successful SSH Authentication"}
+        return {"time": log_time, "ip": ip, "info": f"User: {accepted_match.group('user')}", "status": "-", "severity": severity, "event": "Successful SSH Authentication"}
         
     return None 
 
