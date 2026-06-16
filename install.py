@@ -24,7 +24,7 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
-# Core Tool Code with Custom Recon Status Logic
+# Core Tool Code with Dynamic Host Log Storage Pipeline
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -58,6 +58,9 @@ CACHE_FILES = {
 
 STATUS_FILE = "/tmp/.wcheck_active_view"
 
+# Active Host log naming path configuration matching user specifications
+DYNAMIC_LOG_PATH = f"/var/log/{CONFIGURED_HOSTNAME}.log"
+
 WEB_SIGNATURES = {
     "SQLi": re.compile(r"(UNION[\s/\*]+SELECT|SELECT.+FROM|INSERT[\s/\*]+INTO|OR[\s/\*]+[\d\w]+[\s/\*]*=)", re.I),
     "XSS": re.compile(r"(<script>|javascript:|onerror\s*=|onload\s*=|alert\()", re.I),
@@ -71,9 +74,8 @@ SSH_TRACKER = defaultdict(lambda: {"count": 0, "first_seen": 0.0, "reported": Fa
 SSH_THRESHOLD_LIMIT = 3
 SSH_WINDOW_SECONDS = 60
 
-# Thread-Safe Staging Storage for Scheduled 2-Hour Digest Alerts
 DIGEST_QUEUE = queue.Queue()
-DIGEST_INTERVAL_SECS = 7200  # 2 hours tracking loop window
+DIGEST_INTERVAL_SECS = 7200  # 2-hour monitoring window loop
 
 def send_telegram_raw(msg):
     if not TELEGRAM_BOT_TOKEN or "YOUR_BOT_TOKEN" in TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
@@ -117,8 +119,26 @@ def digest_flusher_loop():
         if not staged_alerts:
             continue
             
+        # Write out compiled raw elements inside historical log file named [hostname].log
+        try:
+            with open(DYNAMIC_LOG_PATH, "a") as f_hist:
+                current_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                f_hist.write(f"--- 2-HOUR DIGEST REPORT FLUSH [{current_timestamp}] Elements: {len(staged_alerts)} ---\n")
+                for item in staged_alerts:
+                    log_type = item['log_type']
+                    alert = item['data']
+                    if log_type == "web":
+                        f_hist.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | Event: {alert['event']}\n")
+                    else:
+                        f_hist.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
+                f_hist.write("\n")
+        except Exception:
+            pass # Failsafe context logic if operating file issues occur
+
+        # Format clean, compressed presentation blocks for Telegram tracking output
         summary = f"📋 <b>[2-HOUR SIEM DIGEST REPORT]</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n"
         summary += f"<b>Total Compiled Logs:</b> {len(staged_alerts)}\n"
+        summary += f"<b>Local Log File:</b> <code>{DYNAMIC_LOG_PATH}</code>\n"
         summary += "────────────────────────\n"
         
         lines = []
@@ -162,7 +182,6 @@ def analyze_web_line(line):
     decoded_url = unquote(data['url'])
     normalized_url = re.sub(r'/\*.*?\*/', ' ', decoded_url)
 
-    # 1. Check for injection attack payloads
     is_attack = False
     for name, pattern in WEB_SIGNATURES.items():
         if pattern.search(normalized_url):
@@ -177,7 +196,6 @@ def analyze_web_line(line):
             severity = "LOW"
             event += " (Blocked/Failed)"
             
-    # 2. Check for targeted directory/file recon probes (.env, .git, config)
     else:
         if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config']):
             if http_status == "200":
@@ -281,7 +299,6 @@ def daemon_engine(log_type, target):
                         with open(cache_path, "a") as cache_f:
                             cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
-                    # Custom Filter Logic Applied
                     if alert['severity'] == "HIGH":
                         threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
                     elif alert['severity'] in ["LOW", "MEDIUM"] and not is_normal_web:
@@ -438,6 +455,7 @@ def main():
 
     print("\n[============= DEPLOYMENT COMPLETE =============]")
     print(f"[*] Configured Hostname: {custom_hostname}")
+    print(f"[*] Automated Digest History Destination: /var/log/{custom_hostname}.log")
     print("[*] Background SIEM engines are running smoothly.")
     print("[=================================================]\n")
 
