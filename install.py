@@ -53,8 +53,9 @@ CACHE_FILES = {
 
 STATUS_FILE = "/tmp/.wcheck_active_view"
 
-# Active Host log naming path configuration matching user specifications
-DYNAMIC_LOG_PATH = f"/var/log/{CONFIGURED_HOSTNAME}.log"
+# Active staging directory for compiling the 2-hour logs before shipment
+STAGING_DIR = "/var/log/siem_stage"
+os.makedirs(STAGING_DIR, exist_ok=True)
 
 WEB_SIGNATURES = {
     "SQLi": re.compile(r"(UNION[\s/\*]+SELECT|SELECT.+FROM|INSERT[\s/\*]+INTO|OR[\s/\*]+[\d\w]+[\s/\*]*=)", re.I),
@@ -70,7 +71,7 @@ SSH_THRESHOLD_LIMIT = 3
 SSH_WINDOW_SECONDS = 60
 
 DIGEST_QUEUE = queue.Queue()
-DIGEST_INTERVAL_SECS = 7200  # 2-hour monitoring window loop
+DIGEST_INTERVAL_SECS = 7200  # 2 Hours tracking window
 
 def send_telegram_raw(msg):
     if not TELEGRAM_BOT_TOKEN or "YOUR_BOT_TOKEN" in TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
@@ -78,6 +79,18 @@ def send_telegram_raw(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=8)
+    except Exception:
+        pass
+
+def upload_telegram_file(file_path, caption):
+    if not TELEGRAM_BOT_TOKEN or "YOUR_BOT_TOKEN" in TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    try:
+        with open(file_path, 'rb') as doc:
+            files = {'document': doc}
+            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
+            requests.post(url, data=data, files=files, timeout=15)
     except Exception:
         pass
 
@@ -114,47 +127,36 @@ def digest_flusher_loop():
         if not staged_alerts:
             continue
             
-        # Write out compiled raw elements inside historical log file named [hostname].log
+        # Format the strict custom filename pattern requested: [Date&Time][Server_Hostname].log
+        timestamp_prefix = time.strftime("%Y-%m-%d_%H-%M-%S")
+        target_filename = f"[{timestamp_prefix}][{CONFIGURED_HOSTNAME}].log"
+        full_log_path = os.path.join(STAGING_DIR, target_filename)
+        
         try:
-            with open(DYNAMIC_LOG_PATH, "a") as f_hist:
-                current_timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                f_hist.write(f"--- 2-HOUR DIGEST REPORT FLUSH [{current_timestamp}] Elements: {len(staged_alerts)} ---\n")
+            # Generate the local log drop file
+            with open(full_log_path, "w") as f_out:
+                f_out.write(f"=== SIEM LOG BATCH FOR {CONFIGURED_HOSTNAME} ===\n")
+                f_out.write(f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f_out.write(f"Total entries: {len(staged_alerts)}\n")
+                f_out.write("="*50 + "\n\n")
+                
                 for item in staged_alerts:
                     log_type = item['log_type']
                     alert = item['data']
                     if log_type == "web":
-                        f_hist.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | Event: {alert['event']}\n")
+                        f_out.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | Event: {alert['event']}\n")
                     else:
-                        f_hist.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
-                f_hist.write("\n")
-        except Exception:
-            pass # Failsafe context logic if operating file issues occur
-
-        # Format clean, compressed presentation blocks for Telegram tracking output
-        summary = f"📋 <b>[2-HOUR SIEM DIGEST REPORT]</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n"
-        summary += f"<b>Total Compiled Logs:</b> {len(staged_alerts)}\n"
-        summary += f"<b>Local Log File:</b> <code>{DYNAMIC_LOG_PATH}</code>\n"
-        summary += "────────────────────────\n"
-        
-        lines = []
-        for item in staged_alerts:
-            log_type = item['log_type']
-            alert = item['data']
-            line_str = f"• [{log_type.upper()}] <b>{alert['severity']}</b> | {alert['ip']} | {alert['event']} [HTTP {alert['status']}]" if log_type == "web" else f"• [{log_type.upper()}] <b>{alert['severity']}</b> | {alert['ip']} | {alert['event']}"
-            lines.append(line_str)
+                        f_out.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
             
-        chunks = []
-        current_chunk = summary
-        for line in lines:
-            if len(current_chunk) + len(line) + 2 > 4000:
-                chunks.append(current_chunk)
-                current_chunk = "📋 <b>[Digest Report Continued...]</b>\n────────────────────────\n" + line + "\n"
-            else:
-                current_chunk += line + "\n"
-        chunks.append(current_chunk)
-        
-        for chunk in chunks:
-            send_telegram_raw(chunk)
+            # Fire the file directly into your telegram chat
+            caption_msg = f"📋 <b>2-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n<b>Compiled Events:</b> {len(staged_alerts)}"
+            upload_telegram_file(full_log_path, caption_msg)
+            
+            # Clean up the file locally from the staging directory to save space
+            os.remove(full_log_path)
+            
+        except Exception:
+            pass
 
 def heartbeat_loop():
     send_heartbeat_message()
@@ -167,7 +169,7 @@ def start_background_threads():
     threading.Thread(target=digest_flusher_loop, daemon=True).start()
 
 def analyze_web_line(line):
-    match = re.match(r'(?P<ip>\S+) \S+ \S+ \[(?P<date>.*?)\] "(?P<method>\S+) (?P<url>\S+)\s?\S*" (?P<status>\d+) (?P<bytes>\S+)', line)
+    match re.match(r'(?P<ip>\S+) \S+ \S+ \[(?P<date>.*?)\] "(?P<method>\S+) (?P<url>\S+)\s?\S*" (?P<status>\d+) (?P<bytes>\S+)', line)
     if not match: return None
 
     data = match.groupdict()
@@ -177,21 +179,17 @@ def analyze_web_line(line):
     decoded_url = unquote(data['url'])
     normalized_url = re.sub(r'/\*.*?\*/', ' ', decoded_url)
 
-    is_attack = False
+    # RULE 1: Core Injection Patterns -> Bypass HTTP filter, alert IMMEDIATELY on hit!
+    is_injection = False
     for name, pattern in WEB_SIGNATURES.items():
         if pattern.search(normalized_url):
-            is_attack = True
+            is_injection = True
+            severity = "HIGH"
             event = f"Attack Detection: {name}"
             break
 
-    if is_attack:
-        if http_status == "200":
-            severity = "HIGH"
-        else:
-            severity = "LOW"
-            event += " (Blocked/Failed)"
-            
-    else:
+    # RULE 2: If it's not an injection attack, evaluate sensitive asset exposure / file recon checks
+    if not is_injection:
         if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config']):
             if http_status == "200":
                 severity = "HIGH"
@@ -231,6 +229,7 @@ def analyze_ssh_line(line):
         else:
             tracker["count"] += 1
 
+        # Status Code logic check applied to Brute-Force threshold detections
         if tracker["count"] >= SSH_THRESHOLD_LIMIT:
             severity = "HIGH"
             event = f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
@@ -294,6 +293,7 @@ def daemon_engine(log_type, target):
                         with open(cache_path, "a") as cache_f:
                             cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
+                    # Split logic paths based on dynamic severity assignment
                     if alert['severity'] == "HIGH":
                         threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
                     elif alert['severity'] in ["LOW", "MEDIUM"] and not is_normal_web:
@@ -411,7 +411,7 @@ def main():
         import rich
         import requests
     except ImportError:
-        print("[*] Required packages missing. Deploying dependencies with system escape override...")
+        print("[*] Required packages missing. Deploying dependencies...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "click", "rich", "requests"])
 
     print(f"[+] Step 2: Provisioning codebase directly into secure global path: {TOOL_PATH}")
@@ -450,8 +450,7 @@ def main():
 
     print("\n[============= DEPLOYMENT COMPLETE =============]")
     print(f"[*] Configured Hostname: {custom_hostname}")
-    print(f"[*] Automated Digest History Destination: /var/log/{custom_hostname}.log")
-    print("[*] Background SIEM engines are running smoothly.")
+    print("[*] SIEM Engine modified successfully.")
     print("[=================================================]\n")
 
 if __name__ == "__main__":
