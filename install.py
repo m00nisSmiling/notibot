@@ -4,6 +4,10 @@ import sys
 import subprocess
 import socket
 
+# =====================================================================
+#  INTERACTIVE DEPLOYMENT CONFIGURATION
+# =====================================================================
+print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -20,6 +24,7 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
+# Core Tool Code with Line 150 Match-Assignment Bug Fix
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -169,7 +174,8 @@ def start_background_threads():
     threading.Thread(target=digest_flusher_loop, daemon=True).start()
 
 def analyze_web_line(line):
-    match re.match(r'(?P<ip>\S+) \S+ \S+ \[(?P<date>.*?)\] "(?P<method>\S+) (?P<url>\S+)\s?\S*" (?P<status>\d+) (?P<bytes>\S+)', line)
+    # FIXED: Added explicitly missing variable assignment operator to fix python parser context
+    match = re.match(r'(?P<ip>\S+) \S+ \S+ \[(?P<date>.*?)\] "(?P<method>\S+) (?P<url>\S+)\s?\S*" (?P<status>\d+) (?P<bytes>\S+)', line)
     if not match: return None
 
     data = match.groupdict()
