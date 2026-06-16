@@ -24,7 +24,7 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
-# Core Tool Code with Dual Mode Immediate / 2-Hour Staging Queue Engine
+# Core Tool Code with Custom Recon Status Logic
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -117,7 +117,6 @@ def digest_flusher_loop():
         if not staged_alerts:
             continue
             
-        # Group metrics cleanly to prevent message truncation limits
         summary = f"📋 <b>[2-HOUR SIEM DIGEST REPORT]</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n"
         summary += f"<b>Total Compiled Logs:</b> {len(staged_alerts)}\n"
         summary += "────────────────────────\n"
@@ -126,10 +125,9 @@ def digest_flusher_loop():
         for item in staged_alerts:
             log_type = item['log_type']
             alert = item['data']
-            line_str = f"• [{log_type.upper()}] <b>{alert['severity']}</b> | {alert['ip']} | {alert['event']}"
+            line_str = f"• [{log_type.upper()}] <b>{alert['severity']}</b> | {alert['ip']} | {alert['event']} [HTTP {alert['status']}]" if log_type == "web" else f"• [{log_type.upper()}] <b>{alert['severity']}</b> | {alert['ip']} | {alert['event']}"
             lines.append(line_str)
             
-        # Group lines up cleanly safely handling maximum 4096 character limits per post
         chunks = []
         current_chunk = summary
         for line in lines:
@@ -159,25 +157,40 @@ def analyze_web_line(line):
 
     data = match.groupdict()
     severity, event = "LOW", "Normal Web Traffic"
+    http_status = data['status']
 
     decoded_url = unquote(data['url'])
     normalized_url = re.sub(r'/\*.*?\*/', ' ', decoded_url)
 
+    # 1. Check for injection attack payloads
+    is_attack = False
     for name, pattern in WEB_SIGNATURES.items():
         if pattern.search(normalized_url):
-            severity = "HIGH"
+            is_attack = True
             event = f"Attack Detection: {name}"
             break
 
-    if severity == "LOW":
-        if data['status'] == "404" and any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config']):
+    if is_attack:
+        if http_status == "200":
             severity = "HIGH"
-            event = "Critical Recon Probing"
-        elif int(data['status']) >= 500:
+        else:
+            severity = "LOW"
+            event += " (Blocked/Failed)"
+            
+    # 2. Check for targeted directory/file recon probes (.env, .git, config)
+    else:
+        if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config']):
+            if http_status == "200":
+                severity = "HIGH"
+                event = "Successful Critical Asset Exposure"
+            else:
+                severity = "LOW"
+                event = "Failed Recon Probing"
+        elif int(http_status) >= 500:
             severity = "MEDIUM"
             event = "Internal Server Error"
 
-    return {"time": data['date'].split()[0], "ip": data['ip'], "info": f"{data['method']} {data['url'][:40]}", "status": data['status'], "severity": severity, "event": event}
+    return {"time": data['date'].split()[0], "ip": data['ip'], "info": f"{data['method']} {data['url'][:40]}", "status": http_status, "severity": severity, "event": event}
 
 def analyze_ssh_line(line):
     parts = line.strip().split()
@@ -268,7 +281,7 @@ def daemon_engine(log_type, target):
                         with open(cache_path, "a") as cache_f:
                             cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
-                    # Core Flow Implementation
+                    # Custom Filter Logic Applied
                     if alert['severity'] == "HIGH":
                         threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
                     elif alert['severity'] in ["LOW", "MEDIUM"] and not is_normal_web:
@@ -277,7 +290,6 @@ def daemon_engine(log_type, target):
                     with open(cache_path, "a") as cache_f:
                         cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
-                    # Core Flow Implementation
                     if alert['severity'] == "HIGH":
                         threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
                     else:
@@ -427,9 +439,6 @@ def main():
     print("\n[============= DEPLOYMENT COMPLETE =============]")
     print(f"[*] Configured Hostname: {custom_hostname}")
     print("[*] Background SIEM engines are running smoothly.")
-    print("[*] Run interactively anytime via your shortcuts:")
-    print(f"    ->  wcheck {WEB_SERVER_TYPE}")
-    print("    ->  shcheck")
     print("[=================================================]\n")
 
 if __name__ == "__main__":
