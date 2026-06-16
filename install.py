@@ -190,7 +190,7 @@ def analyze_web_line(line):
 
     # RULE 2: If it's not an injection attack, evaluate sensitive asset exposure / file recon checks
     if not is_injection:
-        if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config']):
+        if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config', 'dashboard']):
             if http_status == "200":
                 severity = "HIGH"
                 event = "Successful Critical Asset Exposure"
