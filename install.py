@@ -4,10 +4,6 @@ import sys
 import subprocess
 import socket
 
-# =====================================================================
-#  INTERACTIVE DEPLOYMENT CONFIGURATION
-# =====================================================================
-print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -24,7 +20,6 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
-# Core Tool Code with Dynamic Host Log Storage Pipeline
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -93,7 +88,7 @@ def send_telegram_alert(log_type, alert):
         detail = f"{alert['ip']} -> {alert['info']}"
 
     msg = (
-        f"🚨 <b>🔥 IMMEDIATE {alert['severity']} RISK ALERT</b>\n"
+        f"🚨 <b>🔥 {alert['severity']} RISK ALERT</b>\n"
         f"<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n"
         f"<b>Engine:</b> <code>{log_type.upper()} Monitor</code>\n"
         f"<b>Event:</b> <code>{alert['event']}</code>\n"
