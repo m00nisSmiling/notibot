@@ -430,13 +430,38 @@ def run_cmd(cmd_list):
 
 def main():
     print("[+] Step 1: Querying system requirements and package dependencies...")
+    
+    # Pre-flight check: Verify if python3-pip is available on the system
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("[*] Python environment lacks package installation tools. Provisioning python3-pip via apt...")
+        try:
+            subprocess.run(["apt-get", "update"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["apt-get", "install", "-y", "python3-pip"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            print("[!] Critical Failure: Operating system package index updates rejected by the ecosystem manager.")
+            sys.exit(1)
+
     try:
         import click
         import rich
         import requests
     except ImportError:
         print("[*] Required packages missing. Deploying dependencies...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "click", "rich", "requests"])
+        dependencies = ["click", "rich", "requests"]
+        
+        # Strategy A: Attempt execution incorporating strict system environment overrides
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages"] + dependencies, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            # Strategy B: Fallback directly to simple deployment vector if environment bypass configurations are rejected
+            print("[!] Strategy A execution halted. Falling back to simple pipeline without environment overrides...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install"] + dependencies, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError:
+                print("[!] Critical Failure: Local package pipeline completely blocked execution pathways.")
+                sys.exit(1)
 
     print(f"[+] Step 2: Provisioning codebase directly into paths: {TOOL_PATH}")
     write_secured_file(TOOL_PATH, TOOL_CODE, mode=0o700)
