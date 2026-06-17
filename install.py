@@ -193,7 +193,7 @@ def analyze_web_line(line):
         if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config', 'dashboard']):
             if http_status == "200":
                 severity = "HIGH"
-                event = "Asset Bruteforcing"
+                event = "Asset Bruteforcing Detect"
             else:
                 severity = "LOW"
                 event = "Failed Recon Probing"
