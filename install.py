@@ -192,7 +192,7 @@ def analyze_web_line(line):
     if not is_injection:
         if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config', 'dashboard']):
             if http_status == "200":
-                severity = "HIGH"
+                severity = "MEDIUM"
                 event = "Asset Bruteforcing Detect"
             else:
                 severity = "LOW"
