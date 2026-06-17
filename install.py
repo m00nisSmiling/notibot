@@ -4,6 +4,14 @@ import sys
 import subprocess
 import socket
 
+# Ensure script runs as root right off the bat
+if os.getuid() != 0:
+    print("[!] Execution halted: This installation framework must be executed via sudo privileges.")
+    sys.exit(1)
+
+# HARDENING: Enforce strict file creation mask for the installation process (Owner Only)
+os.umask(0o077)
+
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -20,6 +28,12 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
+# HARDENING: Shifted runtime variable flags out of the unsafe public shared /tmp folder 
+RUN_DIR = "/var/run/siem"
+VAR_LOG_DIR = "/var/log/siem"
+os.makedirs(RUN_DIR, mode=0o700, exist_ok=True)
+os.makedirs(VAR_LOG_DIR, mode=0o700, exist_ok=True)
+
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -28,6 +42,7 @@ import queue
 import threading
 import click
 import requests
+import html
 from collections import defaultdict
 from urllib.parse import unquote
 from rich.console import Console
@@ -47,15 +62,13 @@ PATHS = {
 }
 
 CACHE_FILES = {
-    "web": "/tmp/wcheck_live.alerts",
-    "ssh": "/tmp/shcheck_live.alerts"
+    "web": "/var/run/siem/wcheck_live.alerts",
+    "ssh": "/var/run/siem/shcheck_live.alerts"
 }
+STATUS_FILE = "/var/run/siem/.wcheck_active_view"
+STAGING_DIR = "/var/log/siem/siem_stage"
 
-STATUS_FILE = "/tmp/.wcheck_active_view"
-
-# Active staging directory for compiling the logs before shipment
-STAGING_DIR = "/var/log/siem_stage"
-os.makedirs(STAGING_DIR, exist_ok=True)
+os.makedirs(STAGING_DIR, mode=0o700, exist_ok=True)
 
 WEB_SIGNATURES = {
     "SQLi": re.compile(r"(UNION[\s/\*]+SELECT|SELECT.+FROM|INSERT[\s/\*]+INTO|OR[\s/\*]+[\d\w]+[\s/\*]*=)", re.I),
@@ -71,7 +84,10 @@ SSH_THRESHOLD_LIMIT = 3
 SSH_WINDOW_SECONDS = 60
 
 DIGEST_QUEUE = queue.Queue()
-DIGEST_INTERVAL_SECS = 14400  # CHANGED: Formatted to 4 Hours tracking window loop (14400s)
+DIGEST_INTERVAL_SECS = 14400 
+
+def sanitize_log_field(value):
+    return str(value).replace("\n", " ").replace("\r", " ").replace("|", "💳")
 
 def send_telegram_raw(msg):
     if not TELEGRAM_BOT_TOKEN or "YOUR_BOT_TOKEN" in TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
@@ -95,28 +111,26 @@ def upload_telegram_file(file_path, caption):
         pass
 
 def send_telegram_alert(log_type, alert):
+    detail = f"{alert['ip']} -> {alert['info']}"
     if log_type == "web":
-        detail = f"{alert['ip']} -> {alert['info']} [Status: {alert['status']}]"
-    else:
-        detail = f"{alert['ip']} -> {alert['info']}"
+        detail += f" [Status: {alert['status']}]"
 
     msg = (
-        f"🚨 <b>🔥 {alert['severity']} RISK ALERT</b>\n"
-        f"<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n"
-        f"<b>Engine:</b> <code>{log_type.upper()} Monitor</code>\n"
-        f"<b>Event:</b> <code>{alert['event']}</code>\n"
-        f"<b>Detail:</b> <code>{detail}</code>"
+        f"🚨 <b>🔥 {html.escape(alert['severity'])} RISK ALERT</b>\n"
+        f"<b>Host:</b> <code>{html.escape(CONFIGURED_HOSTNAME)}</code>\n"
+        f"<b>Engine:</b> <code>{html.escape(log_type.upper())} Monitor</code>\n"
+        f"<b>Event:</b> <code>{html.escape(alert['event'])}</code>\n"
+        f"<b>Detail:</b> <code>{html.escape(detail)}</code>"
     )
     send_telegram_raw(msg)
 
 def send_heartbeat_message():
-    msg = f"🟢 <b>[{CONFIGURED_HOSTNAME}]</b> : Active"
+    msg = f"🟢 <b>[{html.escape(CONFIGURED_HOSTNAME)}]</b> : Active"
     send_telegram_raw(msg)
 
 def digest_flusher_loop():
     while True:
         time.sleep(DIGEST_INTERVAL_SECS)
-        
         staged_alerts = []
         while not DIGEST_QUEUE.empty():
             try:
@@ -127,14 +141,15 @@ def digest_flusher_loop():
         if not staged_alerts:
             continue
             
-        # Format the strict custom filename pattern requested: [Date&Time][Server_Hostname].log
         timestamp_prefix = time.strftime("%Y-%m-%d_%H-%M-%S")
-        target_filename = f"{timestamp_prefix}{CONFIGURED_HOSTNAME}.log"
+        safe_host = "".join([c for c in CONFIGURED_HOSTNAME if c.isalnum() or c in ['.', '-', '_']])
+        target_filename = f"{timestamp_prefix}_{safe_host}.log"
         full_log_path = os.path.join(STAGING_DIR, target_filename)
         
         try:
-            # Generate the local log drop file
-            with open(full_log_path, "w") as f_out:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            fd = os.open(full_log_path, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f_out:
                 f_out.write(f"=== SIEM LOG BATCH FOR {CONFIGURED_HOSTNAME} ===\n")
                 f_out.write(f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f_out.write(f"Total entries: {len(staged_alerts)}\n")
@@ -148,13 +163,11 @@ def digest_flusher_loop():
                     else:
                         f_out.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
             
-            # Fire the file directly into your telegram chat
-            caption_msg = f"📋 <b>4-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n<b>Compiled Events:</b> {len(staged_alerts)}"
+            caption_msg = f"📋 <b>4-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{html.escape(CONFIGURED_HOSTNAME)}</code>\n<b>Compiled Events:</b> {len(staged_alerts)}"
             upload_telegram_file(full_log_path, caption_msg)
             
-            # Clean up the file locally from the staging directory to save space
-            os.remove(full_log_path)
-            
+            if os.path.exists(full_log_path):
+                os.remove(full_log_path)
         except Exception:
             pass
 
@@ -179,7 +192,6 @@ def analyze_web_line(line):
     decoded_url = unquote(data['url'])
     normalized_url = re.sub(r'/\*.*?\*/', ' ', decoded_url)
 
-    # RULE 1: Core Injection Patterns -> Bypass HTTP filter, alert IMMEDIATELY on hit!
     is_injection = False
     for name, pattern in WEB_SIGNATURES.items():
         if pattern.search(normalized_url):
@@ -188,7 +200,6 @@ def analyze_web_line(line):
             event = f"Attack Detection: {name}"
             break
 
-    # RULE 2: If it's not an injection attack, evaluate sensitive asset exposure / file recon checks
     if not is_injection:
         if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config', 'dashboard']):
             if http_status == "200":
@@ -201,12 +212,18 @@ def analyze_web_line(line):
             severity = "MEDIUM"
             event = "Internal Server Error"
 
-    return {"time": data['date'].split()[0], "ip": data['ip'], "info": f"{data['method']} {data['url'][:40]}", "status": http_status, "severity": severity, "event": event}
+    return {
+        "time": sanitize_log_field(data['date'].split()[0]), 
+        "ip": sanitize_log_field(data['ip']), 
+        "info": sanitize_log_field(f"{data['method']} {data['url'][:40]}"), 
+        "status": sanitize_log_field(http_status), 
+        "severity": severity, 
+        "event": event
+    }
 
 def analyze_ssh_line(line):
     parts = line.strip().split()
-    if not parts:
-        return None
+    if not parts: return None
     
     log_time = parts[0]
     if len(log_time) < 5 and len(parts) >= 3:
@@ -219,7 +236,6 @@ def analyze_ssh_line(line):
         user = failed_match.group(2)
         ip = failed_match.group(3)
         current_time = time.time()
-        
         tracker = SSH_TRACKER[ip]
         
         if tracker["first_seen"] == 0.0 or (current_time - tracker["first_seen"] > SSH_WINDOW_SECONDS):
@@ -237,13 +253,12 @@ def analyze_ssh_line(line):
             event = f"Failed SSH Login Attempt (Count: {tracker['count']})"
 
         return {
-            "time": log_time.split("T")[-1].split(".")[0] if "T" in log_time else log_time, 
-            "ip": ip, 
-            "info": f"User: {user}", 
+            "time": sanitize_log_field(log_time.split("T")[-1].split(".")[0] if "T" in log_time else log_time), 
+            "ip": sanitize_log_field(ip), 
+            "info": sanitize_log_field(f"User: {user}"), 
             "status": "-", 
             "severity": severity, 
-            "event": event,
-            "trigger_telegram": True 
+            "event": event
         }
 
     elif accepted_match:
@@ -254,13 +269,12 @@ def analyze_ssh_line(line):
             
         severity = "HIGH" if "root" in user else "LOW"
         return {
-            "time": log_time.split("T")[-1].split(".")[0] if "T" in log_time else log_time, 
-            "ip": ip, 
-            "info": f"User: {user}", 
+            "time": sanitize_log_field(log_time.split("T")[-1].split(".")[0] if "T" in log_time else log_time), 
+            "ip": sanitize_log_field(ip), 
+            "info": sanitize_log_field(f"User: {user}"), 
             "status": "-", 
             "severity": severity, 
-            "event": "Successful SSH Authentication",
-            "trigger_telegram": True
+            "event": "Successful SSH Authentication"
         }
         
     return None 
@@ -274,7 +288,7 @@ def daemon_engine(log_type, target):
     
     if not os.path.exists(path): return
 
-    with open(path, "r") as f:
+    with open(path, "r", errors="ignore") as f:
         f.seek(0, os.SEEK_END)
         while True:
             line = f.readline()
@@ -289,7 +303,9 @@ def daemon_engine(log_type, target):
                     is_view_active = os.path.exists(STATUS_FILE)
                     
                     if not is_normal_web or is_view_active:
-                        with open(cache_path, "a") as cache_f:
+                        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                        fd = os.open(cache_path, flags, 0o600)
+                        with os.fdopen(fd, "a") as cache_f:
                             cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
                     if alert['severity'] == "HIGH":
@@ -297,7 +313,9 @@ def daemon_engine(log_type, target):
                     elif alert['severity'] in ["LOW", "MEDIUM"] and not is_normal_web:
                         DIGEST_QUEUE.put({"log_type": "web", "data": alert})
                 else:
-                    with open(cache_path, "a") as cache_f:
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                    fd = os.open(cache_path, flags, 0o600)
+                    with os.fdopen(fd, "a") as cache_f:
                         cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
                     if alert['severity'] == "HIGH":
@@ -309,10 +327,15 @@ def run_interactive_ui(log_type, title, col_headers):
     cache_path = CACHE_FILES[log_type]
     
     if log_type == "web":
-        with open(STATUS_FILE, "w") as sf: sf.write("1")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(STATUS_FILE, flags, 0o600)
+        with os.fdopen(fd, "w") as sf:
+            sf.write("1")
 
     if not os.path.exists(cache_path):
-        with open(cache_path, "w") as f: pass
+        flags = os.O_WRONLY | os.O_CREAT
+        fd = os.open(cache_path, flags, 0o600)
+        with os.fdopen(fd, "w") as c_desc: pass
 
     table = Table(expand=True, title=title)
     for col in col_headers: table.add_column(col)
@@ -320,7 +343,7 @@ def run_interactive_ui(log_type, title, col_headers):
     
     try:
         with Live(table, refresh_per_second=4):
-            with open(cache_path, "r") as f:
+            with open(cache_path, "r", errors="ignore") as f:
                 f.seek(0, os.SEEK_END)
                 while True:
                     line = f.readline()
@@ -362,11 +385,12 @@ if __name__ == "__main__":
     cli()
 """
 
+# Context Replacement Injection Processing
 TOOL_CODE = TOOL_CODE.replace("___BOT_TOKEN___", TELEGRAM_BOT_TOKEN)
 TOOL_CODE = TOOL_CODE.replace("___CHAT_ID___", TELEGRAM_CHAT_ID)
 TOOL_CODE = TOOL_CODE.replace("___HOSTNAME___", custom_hostname)
 
-# --- SYSTEMD DAEMON GENERATION LAYOUTS ---
+# Systemd Layout Matrix Structure
 WCHECK_SERVICE = f"""[Unit]
 Description=SIEM Engine - Web Monitoring Background Service
 After=network.target
@@ -395,14 +419,16 @@ Restart=always
 WantedBy=multi-user.target
 """
 
-def run_cmd(cmd):
-    subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def write_secured_file(path, payload, mode=0o600):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(payload)
+
+def run_cmd(cmd_list):
+    subprocess.run(cmd_list, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def main():
-    if os.getuid() != 0:
-        print("[!] Execution halted: This installation framework must be executed via sudo privileges.")
-        sys.exit(1)
-
     print("[+] Step 1: Querying system requirements and package dependencies...")
     try:
         import click
@@ -412,21 +438,17 @@ def main():
         print("[*] Required packages missing. Deploying dependencies...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "click", "rich", "requests"])
 
-    print(f"[+] Step 2: Provisioning codebase directly into secure global path: {TOOL_PATH}")
-    with open(TOOL_PATH, "w") as f:
-        f.write(TOOL_CODE)
-    run_cmd(f"chmod +x {TOOL_PATH}")
+    print(f"[+] Step 2: Provisioning codebase directly into paths: {TOOL_PATH}")
+    write_secured_file(TOOL_PATH, TOOL_CODE, mode=0o700)
 
     print("[+] Step 3: Installing systemd daemon architecture dependencies...")
-    with open("/etc/systemd/system/wcheck-daemon.service", "w") as f:
-        f.write(WCHECK_SERVICE)
-    with open("/etc/systemd/system/shcheck-daemon.service", "w") as f:
-        f.write(SHCHECK_SERVICE)
+    write_secured_file("/etc/systemd/system/wcheck-daemon.service", WCHECK_SERVICE)
+    write_secured_file("/etc/systemd/system/shcheck-daemon.service", SHCHECK_SERVICE)
 
     print("[+] Step 4: Activating systemd engine background loops...")
-    run_cmd("systemctl daemon-reload")
-    run_cmd("systemctl enable --now wcheck-daemon.service")
-    run_cmd("systemctl enable --now shcheck-daemon.service")
+    run_cmd(["systemctl", "daemon-reload"])
+    run_cmd(["systemctl", "enable", "--now", "wcheck-daemon.service"])
+    run_cmd(["systemctl", "enable", "--now", "shcheck-daemon.service"])
 
     print("[+] Step 5: Forging clean command-wrapper executions for CLI routes...")
     wcheck_wrapper_path = os.path.join(TARGET_DIR, "wcheck")
@@ -436,19 +458,15 @@ def main():
         if os.path.exists(target_bin) or os.path.islink(target_bin):
             os.remove(target_bin)
 
-    wcheck_payload = f'#!/bin/bash\n/usr/bin/python3 {TOOL_PATH} wcheck "$@"\n'
-    with open(wcheck_wrapper_path, "w") as f:
-        f.write(wcheck_payload)
-    run_cmd(f"chmod +x {wcheck_wrapper_path}")
+    wcheck_payload = f'#!/bin/bash\nexec /usr/bin/python3 {TOOL_PATH} wcheck "$@"\n'
+    write_secured_file(wcheck_wrapper_path, wcheck_payload, mode=0o755)
 
-    shcheck_payload = f'#!/bin/bash\n/usr/bin/python3 {TOOL_PATH} shcheck "$@"\n'
-    with open(shcheck_wrapper_path, "w") as f:
-        f.write(shcheck_payload)
-    run_cmd(f"chmod +x {shcheck_wrapper_path}")
+    shcheck_payload = f'#!/bin/bash\nexec /usr/bin/python3 {TOOL_PATH} shcheck "$@"\n'
+    write_secured_file(shcheck_wrapper_path, shcheck_payload, mode=0o755)
 
     print("\n[============= DEPLOYMENT COMPLETE =============]")
     print(f"[*] Configured Hostname: {custom_hostname}")
-    print("[*] SIEM Engine modified successfully.")
+    print("[*] Secure SIEM Engine configuration compiled successfully.")
     print("[=================================================]\n")
 
 if __name__ == "__main__":
