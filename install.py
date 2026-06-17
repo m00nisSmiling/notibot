@@ -4,10 +4,6 @@ import sys
 import subprocess
 import socket
 
-# =====================================================================
-#  INTERACTIVE DEPLOYMENT CONFIGURATION
-# =====================================================================
-print("[*] SIEM Tool Deployment Init...")
 TELEGRAM_BOT_TOKEN = input("Telegram Bot Token : ").strip()
 TELEGRAM_CHAT_ID = input("Notification ChatId : ").strip()
 WEB_SERVER_TYPE = input("Server [nginx/apache] : ").strip().lower()
@@ -134,7 +130,7 @@ def digest_flusher_loop():
             
         # Format the strict custom filename pattern requested: [Date&Time][Server_Hostname].log
         timestamp_prefix = time.strftime("%Y-%m-%d_%H-%M-%S")
-        target_filename = f"[{timestamp_prefix}][{CONFIGURED_HOSTNAME}].log"
+        target_filename = f"{timestamp_prefix}{CONFIGURED_HOSTNAME}.log"
         full_log_path = os.path.join(STAGING_DIR, target_filename)
         
         try:
