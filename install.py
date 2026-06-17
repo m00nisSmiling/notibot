@@ -149,12 +149,12 @@ def digest_flusher_loop():
                     log_type = item['log_type']
                     alert = item['data']
                     if log_type == "web":
-                        f_out.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | Event: {alert['event']}\n")
+                        f_out.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | : {alert['']}\n")
                     else:
-                        f_out.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
+                        f_out.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | : {alert['']}\n")
             
             # Fire the file directly into your telegram chat
-            caption_msg = f"📋 <b>2-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n<b>Compiled Events:</b> {len(staged_alerts)}"
+            caption_msg = f"📋 <b>2-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n<b>Compiled s:</b> {len(staged_alerts)}"
             upload_telegram_file(full_log_path, caption_msg)
             
             # Clean up the file locally from the staging directory to save space
@@ -179,7 +179,7 @@ def analyze_web_line(line):
     if not match: return None
 
     data = match.groupdict()
-    severity, event = "LOW", "Normal Web Traffic"
+    severity,  = "LOW", "Normal Web Traffic"
     http_status = data['status']
 
     decoded_url = unquote(data['url'])
@@ -199,7 +199,7 @@ def analyze_web_line(line):
         if any(x in normalized_url.lower() for x in ['.env', '.git', 'wp-admin', 'config', 'dashboard']):
             if http_status == "200":
                 severity = "HIGH"
-                event = "Critical Asset Bruteforcing"
+                event = "Asset Bruteforcing"
             else:
                 severity = "LOW"
                 event = "Failed Recon Probing"
