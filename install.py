@@ -20,7 +20,6 @@ if WEB_SERVER_TYPE not in ["nginx", "apache"]:
 TARGET_DIR = "/usr/local/bin"
 TOOL_PATH = os.path.join(TARGET_DIR, "siem.py")
 
-# Core Tool Code with Line 150 Match-Assignment Bug Fix
 TOOL_CODE = r"""#!/usr/bin/env python3
 import os
 import re
@@ -54,7 +53,7 @@ CACHE_FILES = {
 
 STATUS_FILE = "/tmp/.wcheck_active_view"
 
-# Active staging directory for compiling the 2-hour logs before shipment
+# Active staging directory for compiling the logs before shipment
 STAGING_DIR = "/var/log/siem_stage"
 os.makedirs(STAGING_DIR, exist_ok=True)
 
@@ -72,7 +71,7 @@ SSH_THRESHOLD_LIMIT = 3
 SSH_WINDOW_SECONDS = 60
 
 DIGEST_QUEUE = queue.Queue()
-DIGEST_INTERVAL_SECS = 7200  # 2 Hours tracking window
+DIGEST_INTERVAL_SECS = 14400  # CHANGED: Formatted to 4 Hours tracking window loop (14400s)
 
 def send_telegram_raw(msg):
     if not TELEGRAM_BOT_TOKEN or "YOUR_BOT_TOKEN" in TELEGRAM_BOT_TOKEN or "___" in TELEGRAM_BOT_TOKEN:
@@ -145,12 +144,12 @@ def digest_flusher_loop():
                     log_type = item['log_type']
                     alert = item['data']
                     if log_type == "web":
-                        f_out.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | : {alert['']}\n")
+                        f_out.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | Event: {alert['event']}\n")
                     else:
-                        f_out.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | : {alert['']}\n")
+                        f_out.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
             
             # Fire the file directly into your telegram chat
-            caption_msg = f"📋 <b>2-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n<b>Compiled s:</b> {len(staged_alerts)}"
+            caption_msg = f"📋 <b>4-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{CONFIGURED_HOSTNAME}</code>\n<b>Compiled Events:</b> {len(staged_alerts)}"
             upload_telegram_file(full_log_path, caption_msg)
             
             # Clean up the file locally from the staging directory to save space
@@ -170,12 +169,11 @@ def start_background_threads():
     threading.Thread(target=digest_flusher_loop, daemon=True).start()
 
 def analyze_web_line(line):
-    # FIXED: Added explicitly missing variable assignment operator to fix python parser context
     match = re.match(r'(?P<ip>\S+) \S+ \S+ \[(?P<date>.*?)\] "(?P<method>\S+) (?P<url>\S+)\s?\S*" (?P<status>\d+) (?P<bytes>\S+)', line)
     if not match: return None
 
     data = match.groupdict()
-    severity,  = "LOW", "Normal Web Traffic"
+    severity, event = "LOW", "Normal Web Traffic"
     http_status = data['status']
 
     decoded_url = unquote(data['url'])
@@ -231,7 +229,6 @@ def analyze_ssh_line(line):
         else:
             tracker["count"] += 1
 
-        # Status Code logic check applied to Brute-Force threshold detections
         if tracker["count"] >= SSH_THRESHOLD_LIMIT:
             severity = "HIGH"
             event = f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
@@ -295,7 +292,6 @@ def daemon_engine(log_type, target):
                         with open(cache_path, "a") as cache_f:
                             cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
                     
-                    # Split logic paths based on dynamic severity assignment
                     if alert['severity'] == "HIGH":
                         threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
                     elif alert['severity'] in ["LOW", "MEDIUM"] and not is_normal_web:
