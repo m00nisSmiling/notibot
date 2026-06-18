@@ -246,7 +246,7 @@ def analyze_ssh_line(line):
             tracker["count"] += 1
 
         if tracker["count"] >= SSH_THRESHOLD_LIMIT:
-            severity = "HIGH"
+            severity = "MEDIUM"
             event = f"SSH Brute-Force: {tracker['count']} Failures in <{SSH_WINDOW_SECONDS}s"
         else:
             severity = "LOW"
