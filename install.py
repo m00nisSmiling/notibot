@@ -280,48 +280,72 @@ def analyze_ssh_line(line):
     return None 
 
 def daemon_engine(log_type, target):
-    if log_type == "web":
-        start_background_threads()
+    # FIX #2: Run background threads inside BOTH background instances explicitly
+    start_background_threads()
 
     path = PATHS[target] if log_type == "web" else PATHS["ssh"]
     cache_path = CACHE_FILES[log_type]
     
     if not os.path.exists(path): return
 
-    with open(path, "r", errors="ignore") as f:
-        f.seek(0, os.SEEK_END)
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(0.1)
+    # Initialize inode metadata state tracking to combat structural logrotations
+    try:
+        current_inode = os.stat(path).st_ino
+    except Exception:
+        current_inode = None
+
+    f = open(path, "r", errors="ignore")
+    f.seek(0, os.SEEK_END)
+
+    while True:
+        try:
+            # FIX #1: Verify log file integrity states actively on each step iteration loop
+            if os.path.exists(path):
+                stat_meta = os.stat(path)
+                if stat_meta.st_ino != current_inode or stat_meta.st_size < f.tell():
+                    f.close()
+                    time.sleep(1.0)  # Settle time window for log filesystem assignments
+                    f = open(path, "r", errors="ignore")
+                    current_inode = stat_meta.st_ino
+                    continue
+            else:
+                time.sleep(2.0)
                 continue
+        except Exception:
+            time.sleep(2.0)
+            continue
+
+        line = f.readline()
+        if not line:
+            time.sleep(0.1)
+            continue
             
-            alert = analyze_web_line(line) if log_type == "web" else analyze_ssh_line(line)
-            if alert:
-                if log_type == "web":
-                    is_normal_web = (alert['severity'] == "LOW" and alert['event'] == "Normal Web Traffic")
-                    is_view_active = os.path.exists(STATUS_FILE)
-                    
-                    if not is_normal_web or is_view_active:
-                        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-                        fd = os.open(cache_path, flags, 0o600)
-                        with os.fdopen(fd, "a") as cache_f:
-                            cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
-                    
-                    if alert['severity'] == "HIGH":
-                        threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
-                    elif alert['severity'] in ["LOW", "MEDIUM"] and not is_normal_web:
-                        DIGEST_QUEUE.put({"log_type": "web", "data": alert})
-                else:
+        alert = analyze_web_line(line) if log_type == "web" else analyze_ssh_line(line)
+        if alert:
+            if log_type == "web":
+                is_normal_web = (alert['severity'] == "LOW" and alert['event'] == "Normal Web Traffic")
+                is_view_active = os.path.exists(STATUS_FILE)
+                
+                if not is_normal_web or is_view_active:
                     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
                     fd = os.open(cache_path, flags, 0o600)
                     with os.fdopen(fd, "a") as cache_f:
                         cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
-                    
-                    if alert['severity'] == "HIGH":
-                        threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
-                    else:
-                        DIGEST_QUEUE.put({"log_type": "ssh", "data": alert})
+                
+                if alert['severity'] == "HIGH":
+                    threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
+                elif alert['severity'] in ["LOW", "MEDIUM"] and not is_normal_web:
+                    DIGEST_QUEUE.put({"log_type": "web", "data": alert})
+            else:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                fd = os.open(cache_path, flags, 0o600)
+                with os.fdopen(fd, "a") as cache_f:
+                    cache_f.write(f"{alert['time']}|{alert['ip']}|{alert['info']}|{alert['status']}|{alert['severity']}|{alert['event']}\n")
+                
+                if alert['severity'] == "HIGH":
+                    threading.Thread(target=send_telegram_alert, args=(log_type, alert), daemon=True).start()
+                else:
+                    DIGEST_QUEUE.put({"log_type": "ssh", "data": alert})
 
 def run_interactive_ui(log_type, title, col_headers):
     cache_path = CACHE_FILES[log_type]
@@ -431,7 +455,6 @@ def run_cmd(cmd_list):
 def main():
     print("[+] Step 1: Querying system requirements and package dependencies...")
     
-    # Pre-flight check: Verify if python3-pip is available on the system
     try:
         subprocess.run([sys.executable, "-m", "pip", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -451,11 +474,9 @@ def main():
         print("[*] Required packages missing. Deploying dependencies...")
         dependencies = ["click", "rich", "requests"]
         
-        # Strategy A: Attempt execution incorporating strict system environment overrides
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages"] + dependencies, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
-            # Strategy B: Fallback directly to simple deployment vector if environment bypass configurations are rejected
             print("[!] Strategy A execution halted. Falling back to simple pipeline without environment overrides...")
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install"] + dependencies, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
