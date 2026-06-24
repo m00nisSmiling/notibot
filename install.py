@@ -143,27 +143,29 @@ def digest_flusher_loop():
             
         timestamp_prefix = time.strftime("%Y-%m-%d_%H-%M-%S")
         safe_host = "".join([c for c in CONFIGURED_HOSTNAME if c.isalnum() or c in ['.', '-', '_']])
-        target_filename = f"{timestamp_prefix}_{safe_host}.log"
+        # A single unified log file for the reporting interval
+        target_filename = f"{timestamp_prefix}_{safe_host}_unified_siem.log"
         full_log_path = os.path.join(STAGING_DIR, target_filename)
         
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
             fd = os.open(full_log_path, flags, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f_out:
-                f_out.write(f"=== SIEM LOG BATCH FOR {CONFIGURED_HOSTNAME} ===\n")
+                f_out.write(f"=== UNIFIED SIEM LOG BATCH FOR {CONFIGURED_HOSTNAME} ===\n")
                 f_out.write(f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f_out.write(f"Total entries: {len(staged_alerts)}\n")
-                f_out.write("="*50 + "\n\n")
+                f_out.write(f"Total Combined Entries: {len(staged_alerts)}\n")
+                f_out.write("="*60 + "\n\n")
                 
+                # Appends both types to the same file dynamically as they appear in the queue
                 for item in staged_alerts:
                     log_type = item['log_type']
                     alert = item['data']
                     if log_type == "web":
-                        f_out.write(f"[{alert['time']}] WEB_RECON | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | Event: {alert['event']}\n")
+                        f_out.write(f"[{alert['time']}] [WEB] | Severity: {alert['severity']} | IP: {alert['ip']} | Request: {alert['info']} | Status: {alert['status']} | Event: {alert['event']}\n")
                     else:
-                        f_out.write(f"[{alert['time']}] SSH_BRUTE | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
+                        f_out.write(f"[{alert['time']}] [SSH] | Severity: {alert['severity']} | IP: {alert['ip']} | Detail: {alert['info']} | Event: {alert['event']}\n")
             
-            caption_msg = f"📋 <b>4-Hour SIEM Log Delivery</b>\n<b>Host:</b> <code>{html.escape(CONFIGURED_HOSTNAME)}</code>\n<b>Compiled Events:</b> {len(staged_alerts)}"
+            caption_msg = f"📋 <b>4-Hour Unified SIEM Log Delivery</b>\n<b>Host:</b> <code>{html.escape(CONFIGURED_HOSTNAME)}</code>\n<b>Total Compiled Threats:</b> {len(staged_alerts)}"
             upload_telegram_file(full_log_path, caption_msg)
             
             if os.path.exists(full_log_path):
@@ -280,7 +282,6 @@ def analyze_ssh_line(line):
     return None 
 
 def daemon_engine(log_type, target):
-    # FIX #2: Run background threads inside BOTH background instances explicitly
     start_background_threads()
 
     path = PATHS[target] if log_type == "web" else PATHS["ssh"]
@@ -288,7 +289,6 @@ def daemon_engine(log_type, target):
     
     if not os.path.exists(path): return
 
-    # Initialize inode metadata state tracking to combat structural logrotations
     try:
         current_inode = os.stat(path).st_ino
     except Exception:
@@ -299,12 +299,11 @@ def daemon_engine(log_type, target):
 
     while True:
         try:
-            # FIX #1: Verify log file integrity states actively on each step iteration loop
             if os.path.exists(path):
                 stat_meta = os.stat(path)
                 if stat_meta.st_ino != current_inode or stat_meta.st_size < f.tell():
                     f.close()
-                    time.sleep(1.0)  # Settle time window for log filesystem assignments
+                    time.sleep(1.0)  
                     f = open(path, "r", errors="ignore")
                     current_inode = stat_meta.st_ino
                     continue
