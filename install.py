@@ -445,7 +445,7 @@ def send_one_time_heartbeat(token, chat_id, hostname):
         return
     import html
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    msg = f"🟢 <b>[{html.escape(hostname)}]</b> : SIEM Ingestion Platform Successfully Configured & Active"
+    msg = f"🟢 <b>[{html.escape(hostname)}]</b> : SIEM Daemon Successfully Configured & Active"
     try:
         import requests
         requests.post(url, data={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=8)
