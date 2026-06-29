@@ -124,10 +124,6 @@ def send_telegram_alert(log_type, alert):
     )
     send_telegram_raw(msg)
 
-def send_heartbeat_message():
-    msg = f"🟢 <b>[{html.escape(CONFIGURED_HOSTNAME)}]</b> : Active"
-    send_telegram_raw(msg)
-
 def digest_flusher_loop():
     while True:
         time.sleep(DIGEST_INTERVAL_SECS)
@@ -143,7 +139,6 @@ def digest_flusher_loop():
             
         timestamp_prefix = time.strftime("%Y-%m-%d_%H-%M-%S")
         safe_host = "".join([c for c in CONFIGURED_HOSTNAME if c.isalnum() or c in ['.', '-', '_']])
-        # A single unified log file for the reporting interval
         target_filename = f"{timestamp_prefix}_{safe_host}_unified_siem.log"
         full_log_path = os.path.join(STAGING_DIR, target_filename)
         
@@ -156,7 +151,6 @@ def digest_flusher_loop():
                 f_out.write(f"Total Combined Entries: {len(staged_alerts)}\n")
                 f_out.write("="*60 + "\n\n")
                 
-                # Appends both types to the same file dynamically as they appear in the queue
                 for item in staged_alerts:
                     log_type = item['log_type']
                     alert = item['data']
@@ -173,14 +167,8 @@ def digest_flusher_loop():
         except Exception:
             pass
 
-def heartbeat_loop():
-    send_heartbeat_message()
-    while True:
-        time.sleep(86400)
-        send_heartbeat_message()
-
 def start_background_threads():
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    # Only background engine thread kept running is the 4-hour log delivery batch flusher
     threading.Thread(target=digest_flusher_loop, daemon=True).start()
 
 def analyze_web_line(line):
@@ -451,6 +439,19 @@ def write_secured_file(path, payload, mode=0o600):
 def run_cmd(cmd_list):
     subprocess.run(cmd_list, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def send_one_time_heartbeat(token, chat_id, hostname):
+    """Fires a clean, single confirmation message directly to Telegram upon successful setup verification."""
+    if not token or "___" in token:
+        return
+    import html
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    msg = f"🟢 <b>[{html.escape(hostname)}]</b> : SIEM Ingestion Platform Successfully Configured & Active"
+    try:
+        import requests
+        requests.post(url, data={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=8)
+    except Exception:
+        print("[!] Warning: Could not deliver the initiation heartbeat check via Telegram API.")
+
 def main():
     print("[+] Step 1: Querying system requirements and package dependencies...")
     
@@ -509,9 +510,13 @@ def main():
     shcheck_payload = f'#!/bin/bash\nexec /usr/bin/python3 {TOOL_PATH} shcheck "$@"\n'
     write_secured_file(shcheck_wrapper_path, shcheck_payload, mode=0o755)
 
+    # Fire one-time initialization notification now that services are confirmed running
+    print("[+] Step 6: Dispatching installation validation payload to Telegram channel...")
+    send_one_time_heartbeat(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, custom_hostname)
+
     print("\n[============= DEPLOYMENT COMPLETE =============]")
     print(f"[*] Configured Hostname: {custom_hostname}")
-    print("[*] Secure SIEM Engine configuration compiled successfully.")
+    print("[*] Secure SIEM Engine configuration compiled successfully (Daily heartbeat replaced by setup check).")
     print("[=================================================]\n")
 
 if __name__ == "__main__":
