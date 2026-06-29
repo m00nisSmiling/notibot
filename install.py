@@ -491,6 +491,38 @@ def main():
     write_secured_file("/etc/systemd/system/wcheck-daemon.service", WCHECK_SERVICE)
     write_secured_file("/etc/systemd/system/shcheck-daemon.service", SHCHECK_SERVICE)
 
+    # ERROR HANDLING PRE-FLIGHT CHECK: Enforce sufficient inotify watches before starting systemd
+    print("[*] Auditing system kernel thresholds for structural filesystem tracking capacity...")
+    inotify_limit_path = "/proc/sys/fs/inotify/max_user_watches"
+    target_minimum_allocation = 524288
+    
+    if os.path.exists(inotify_limit_path):
+        try:
+            with open(inotify_limit_path, "r") as f_limit:
+                current_limit = int(f_limit.read().strip())
+            
+            if current_limit < target_minimum_allocation:
+                print(f"[*] Lower inotify limits detected ({current_limit}). Patching allocation limits to prevent runtime errors...")
+                # Apply changes to the live running kernel
+                subprocess.run(["sysctl", f"fs.inotify.max_user_watches={target_minimum_allocation}"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["sysctl", "fs.inotify.max_user_instances=512"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Make configurations permanent across reboots
+                sysctl_conf_path = "/etc/sysctl.conf"
+                sysctl_payload = (
+                    "\n# Elevate directory watch allocation limits for SIEM monitoring engines\n"
+                    f"fs.inotify.max_user_watches={target_minimum_allocation}\n"
+                    "fs.inotify.max_user_instances=512\n"
+                )
+                
+                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                fd = os.open(sysctl_conf_path, flags, 0o644)
+                with os.fdopen(fd, "a") as f_sysctl:
+                    f_sysctl.write(sysctl_payload)
+                print("[+] Kernel resource metrics optimized permanently on the system.")
+        except Exception as inotify_err:
+            print(f"[!] Warning: Unable to verify or patch inotify kernel configurations ({inotify_err}). Proceeding anyway...")
+
     print("[+] Step 4: Activating systemd engine background loops...")
     run_cmd(["systemctl", "daemon-reload"])
     run_cmd(["systemctl", "enable", "--now", "wcheck-daemon.service"])
