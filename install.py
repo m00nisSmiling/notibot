@@ -139,7 +139,7 @@ def digest_flusher_loop():
             
         timestamp_prefix = time.strftime("%Y-%m-%d_%H-%M-%S")
         safe_host = "".join([c for c in CONFIGURED_HOSTNAME if c.isalnum() or c in ['.', '-', '_']])
-        target_filename = f"{timestamp_prefix}_{safe_host}_unified_siem.log"
+        target_filename = f"{timestamp_prefix}_{safe_host}.log"
         full_log_path = os.path.join(STAGING_DIR, target_filename)
         
         try:
